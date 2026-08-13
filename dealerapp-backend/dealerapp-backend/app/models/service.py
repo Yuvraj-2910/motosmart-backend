@@ -37,6 +37,14 @@ class ServiceRequest(Base, TimestampsMixin):
     )
     preferred_date: Mapped[date | None] = mapped_column(Date)
 
+    # Who closed it, and when. There is no assignee on a service request — the
+    # branch's whole desk is notified — so this is the only record of which
+    # employee earned the closing incentive.
+    resolved_by_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # AI triage of the customer's own description, filled in on creation. Nullable
     # because classification is best-effort - a ticket is never blocked on it.
     ai_category: Mapped[str | None] = mapped_column(String(30))

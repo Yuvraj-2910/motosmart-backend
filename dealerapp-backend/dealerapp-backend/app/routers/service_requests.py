@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
@@ -128,6 +129,19 @@ async def _enrich(
             )
         ).scalars()
     }
+    # Whoever closed each ticket, for the "resolved by" line.
+    resolver_ids = {r.resolved_by_employee_id for r in requests if r.resolved_by_employee_id}
+    resolvers = {}
+    if resolver_ids:
+        resolvers = {
+            e.id: e.name
+            for e in (
+                await session.execute(
+                    select(Employee).where(Employee.id.in_(resolver_ids))
+                )
+            ).scalars()
+        }
+
     model_ids = {v.bike_model_id for v in vehicles.values() if v.bike_model_id}
     models = {}
     if model_ids:
@@ -141,6 +155,8 @@ async def _enrich(
         }
 
     for request, dto in zip(requests, dtos):
+        if request.resolved_by_employee_id:
+            dto.resolved_by_name = resolvers.get(request.resolved_by_employee_id)
         customer = customers.get(request.customer_id)
         if customer is not None:
             dto.customer_name = customer.name
@@ -397,7 +413,19 @@ async def update_service_request(
     user: DealerUserDep,
 ) -> ServiceRequestOut:
     request = await _authorised_request(session, request_id, user)
+
+    was_resolved = request.status == ServiceRequestStatus.RESOLVED
     request.status = payload.status
+
+    if payload.status == ServiceRequestStatus.RESOLVED and not was_resolved:
+        # Closing the ticket is the payable act; record who did it and when.
+        request.resolved_by_employee_id = user.employee_id
+        request.resolved_at = datetime.now(UTC)
+    elif payload.status != ServiceRequestStatus.RESOLVED and was_resolved:
+        # Re-opened: the incentive is withdrawn with the closure it was paid for.
+        request.resolved_by_employee_id = None
+        request.resolved_at = None
+
     await session.commit()
     dto = ServiceRequestOut.model_validate(request)
     await _enrich(session, [request], [dto])

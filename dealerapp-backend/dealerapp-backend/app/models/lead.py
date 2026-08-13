@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, ForeignKey, Index, String, Text, text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +45,14 @@ class Lead(Base, TimestampsMixin):
     converted_customer_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("customers.id", ondelete="SET NULL")
     )
+
+    # Who converted it, and when. Credit follows the person who did the work, not
+    # the person the lead happened to be assigned to; the timestamp fixes the
+    # month, so a later edit cannot move an earned incentive into another period.
+    converted_by_employee_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("employees.id", ondelete="SET NULL")
+    )
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     followups: Mapped[list["LeadFollowup"]] = relationship(
         back_populates="lead",

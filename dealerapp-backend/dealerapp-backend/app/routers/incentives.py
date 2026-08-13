@@ -76,7 +76,13 @@ async def dealer_incentives(
 
     employees, computed = await load()
 
-    if employees and not computed:
+    # The current month is live: the figures move every time somebody converts a
+    # lead or closes a ticket, so recompute on read rather than serving a row
+    # that went stale the moment it was written. Past months keep their stored
+    # figures — that is what makes them payable.
+    is_current_period = period == incentive_service.parse_period(None)
+
+    if employees and (not computed or is_current_period):
         await incentive_service.recompute(session, month=period, dealer_id=dealer_id)
         await session.commit()
         employees, computed = await load()

@@ -64,6 +64,11 @@ class ServiceRequestOut(ORMModel):
     ai_priority: TicketPriority | None = None
     ai_summary: str | None = None
 
+    # Who closed it, when. Null until somebody resolves it.
+    resolved_by_employee_id: uuid.UUID | None = None
+    resolved_at: datetime | None = None
+    resolved_by_name: str | None = None
+
     # Denormalised identity of who raised it and on what. The dealer queue needs
     # a name and a vehicle to be usable, and joining it here saves the app an
     # N+1 lookup it has no way to do (it cannot read the customers table).

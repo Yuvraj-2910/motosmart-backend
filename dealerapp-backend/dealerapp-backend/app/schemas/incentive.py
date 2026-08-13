@@ -20,6 +20,8 @@ class EmployeeIncentiveOut(ORMModel):
     leads_count: int
     conversions_count: int
     test_rides_count: int
+    # Service tickets this employee closed in the period.
+    tickets_resolved_count: int = 0
     sales_count: int
     total_incentive: Decimal
     computed_at: datetime | None = None

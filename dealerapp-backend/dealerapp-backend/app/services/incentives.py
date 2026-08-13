@@ -1,9 +1,23 @@
 """Incentive computation.
 
-`recompute(month)` aggregates each employee's activity for a calendar month from
-`leads` and `test_ride_bookings`, prices it with the dealer's `incentive_rules`,
-and upserts one `employee_incentives` row per employee. Exposed for the demo via
-`POST /internal/incentives/recompute`.
+Two acts earn money, and both are attributed to the person who performed them:
+
+* **Converting a lead** into a customer (`POST /leads/{id}/convert`) pays
+  `per_conversion_amount` to `leads.converted_by_employee_id`. A lead that was
+  lost, or is still open, pays nothing.
+* **Closing a service ticket** (moving it to RESOLVED) pays TICKET_RESOLVED to
+  `service_requests.resolved_by_employee_id`. Re-opening a ticket clears that
+  field, so the incentive is withdrawn with the closure it was paid for.
+
+Completed test rides also pay, credited to whoever owns the generated lead.
+Leads *created* are counted for context but are not paid — capturing an enquiry
+is the job, closing it is the achievement.
+
+Every figure is derived from `leads`, `service_requests` and
+`test_ride_bookings`, so `recompute(month)` is idempotent and a re-run months
+later produces the same numbers. It upserts one `employee_incentives` row per
+employee per month; `GET /incentives` computes on first read if nothing is stored
+yet. Exposed for the demo via `POST /internal/incentives/recompute`.
 """
 
 from __future__ import annotations
@@ -17,19 +31,29 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.engagement import TestRideBooking
-from app.models.enums import IncentiveEventType, LeadStatus, TestRideStatus
+from app.models.enums import (
+    IncentiveEventType,
+    LeadStatus,
+    ServiceRequestStatus,
+    TestRideStatus,
+)
 from app.models.incentive import EmployeeIncentive, IncentiveRule
 from app.models.lead import Lead
 from app.models.org import Employee
+from app.models.service import ServiceRequest
 
 logger = logging.getLogger(__name__)
 
-# Applied when a dealer has no rule configured for an event type, so the screen
-# is never blank during a demo.
+# What each act is worth, in rupees, when a dealer has configured no rule of
+# their own. A dealer overrides any of these with an `incentive_rules` row.
 DEFAULT_AMOUNTS: dict[str, Decimal] = {
+    # Converting an enquiry into a customer. The two names are the same event in
+    # this data model (see `per_conversion_amount`), so the higher one prices it.
     IncentiveEventType.LEAD_CONVERTED: Decimal("500"),
-    IncentiveEventType.TEST_RIDE: Decimal("100"),
     IncentiveEventType.SALE: Decimal("1500"),
+    # Closing a customer's service ticket.
+    IncentiveEventType.TICKET_RESOLVED: Decimal("300"),
+    IncentiveEventType.TEST_RIDE: Decimal("100"),
 }
 
 
@@ -121,19 +145,38 @@ async def recompute(
         ).all()
     )
 
-    # Conversions are attributed to the month the lead closed (updated_at),
-    # which is when the salesperson earned it.
+    # Conversions are credited to whoever performed the conversion, in the month
+    # they performed it. A lead that was lost, or is still open, pays nothing —
+    # only CLOSED_WON with a customer attached counts.
     conversions = dict(
         (
             await session.execute(
-                select(Lead.assigned_employee_id, func.count())
+                select(Lead.converted_by_employee_id, func.count())
                 .where(
-                    Lead.assigned_employee_id.in_(employee_ids),
+                    Lead.converted_by_employee_id.in_(employee_ids),
                     Lead.status == LeadStatus.CLOSED_WON,
-                    Lead.updated_at >= start,
-                    Lead.updated_at < end,
+                    Lead.converted_customer_id.is_not(None),
+                    Lead.converted_at >= start,
+                    Lead.converted_at < end,
                 )
-                .group_by(Lead.assigned_employee_id)
+                .group_by(Lead.converted_by_employee_id)
+            )
+        ).all()
+    )
+
+    # Closed service tickets, credited to whoever moved them to RESOLVED. A ticket
+    # that was re-opened has its resolver cleared, so it stops counting.
+    tickets_resolved = dict(
+        (
+            await session.execute(
+                select(ServiceRequest.resolved_by_employee_id, func.count())
+                .where(
+                    ServiceRequest.resolved_by_employee_id.in_(employee_ids),
+                    ServiceRequest.status == ServiceRequestStatus.RESOLVED,
+                    ServiceRequest.resolved_at >= start,
+                    ServiceRequest.resolved_at < end,
+                )
+                .group_by(ServiceRequest.resolved_by_employee_id)
             )
         ).all()
     )
@@ -180,6 +223,7 @@ async def recompute(
         leads_count = int(leads_created.get(employee.id, 0))
         conversions_count = int(conversions.get(employee.id, 0))
         test_rides_count = int(test_rides.get(employee.id, 0))
+        tickets_resolved_count = int(tickets_resolved.get(employee.id, 0))
         # A conversion to CLOSED_WON *is* the sale in this data model, so the
         # count is reported under both names for the UI...
         sales_count = conversions_count
@@ -187,6 +231,7 @@ async def recompute(
         # ...but paid only once - see `per_conversion_amount`.
         total = (
             per_conversion_amount(amounts) * conversions_count
+            + amounts[IncentiveEventType.TICKET_RESOLVED] * tickets_resolved_count
             + amounts[IncentiveEventType.TEST_RIDE] * test_rides_count
         )
         grand_total += total
@@ -198,6 +243,7 @@ async def recompute(
         row.leads_count = leads_count
         row.conversions_count = conversions_count
         row.test_rides_count = test_rides_count
+        row.tickets_resolved_count = tickets_resolved_count
         row.sales_count = sales_count
         row.total_incentive = total
         row.computed_at = datetime.now(UTC)
@@ -240,6 +286,20 @@ def _selfcheck() -> None:
             pass
         else:  # pragma: no cover - only reached if validation regresses
             raise AssertionError(f"{bad!r} should have been rejected")
+
+    # The two paid acts, and what a mixed month costs.
+    amounts = dict(DEFAULT_AMOUNTS)
+    assert amounts[IncentiveEventType.TICKET_RESOLVED] == Decimal("300")
+    one_conversion_two_tickets = (
+        per_conversion_amount(amounts) * 1
+        + amounts[IncentiveEventType.TICKET_RESOLVED] * 2
+    )
+    assert one_conversion_two_tickets == Decimal("2100"), one_conversion_two_tickets
+
+    # A dealer's own rule overrides the default for that event only.
+    tuned = dict(DEFAULT_AMOUNTS) | {IncentiveEventType.TICKET_RESOLVED: Decimal("450")}
+    assert tuned[IncentiveEventType.TICKET_RESOLVED] == Decimal("450")
+    assert per_conversion_amount(tuned) == per_conversion_amount(DEFAULT_AMOUNTS)
 
     print("incentives self-check: OK")
 

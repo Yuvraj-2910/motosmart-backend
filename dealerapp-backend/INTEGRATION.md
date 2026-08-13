@@ -217,6 +217,42 @@ Why the app posts readings instead of the server reading `obd_telemetry`: the
 dashboard can be driven by a live device whose readings were never persisted, and
 the summary has to describe what the rider is actually looking at.
 
+## Incentives
+
+Two acts earn money, each attributed to the person who performed it:
+
+| Act | Who is paid | Default | Where it is recorded |
+|---|---|---|---|
+| Converting a lead into a customer | whoever ran `POST /leads/{id}/convert` | **₹1,500** | `leads.converted_by_employee_id` + `converted_at` |
+| Closing a service ticket (→ RESOLVED) | whoever moved it | **₹300** | `service_requests.resolved_by_employee_id` + `resolved_at` |
+| Completing a test ride | the generated lead's assignee | ₹100 | `test_ride_bookings.status` |
+
+A dealer overrides any amount with an `incentive_rules` row for that event type;
+`DEFAULT_AMOUNTS` in `services/incentives.py` applies otherwise.
+
+**A lead that is lost or still open pays nothing** — the query requires
+`CLOSED_WON` *and* a linked customer. **Re-opening a ticket withdraws its
+incentive**: the resolver field is cleared, so the next recompute drops it.
+Closing it again restores it.
+
+Credit follows the actor, not the assignee: if a lead assigned to A is converted
+by B, **B is paid**. Both timestamps are set at the moment of the act, so a later
+edit to the row cannot move an earned incentive into a different month.
+
+Leads *created* are counted for context but never paid — capturing an enquiry is
+the job; closing it is the achievement.
+
+Figures are derived, never accumulated, so `recompute` is idempotent:
+
+```bash
+curl -X POST localhost:8000/api/v1/internal/incentives/recompute \
+  -H 'X-Internal-Key: dev-internal-key' -H 'Content-Type: application/json' -d '{}'
+```
+
+`GET /incentives?month=YYYY-MM` computes on first read when nothing is stored, so
+the screen is never blank. `python -m app.services.incentives` checks the
+arithmetic with no database.
+
 ## Gotchas
 
 - **CORS**: allowed origins are `localhost:3000/8080` and `127.0.0.1:8080`. A

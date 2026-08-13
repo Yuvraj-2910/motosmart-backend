@@ -106,9 +106,13 @@ class ChatRole(StrEnum):
 
 
 class IncentiveEventType(StrEnum):
+    """What an employee gets paid for."""
+
     LEAD_CONVERTED = "LEAD_CONVERTED"
     TEST_RIDE = "TEST_RIDE"
     SALE = "SALE"
+    # Closing a customer's service ticket. Paid to whoever moved it to RESOLVED.
+    TICKET_RESOLVED = "TICKET_RESOLVED"
 
 
 class IncentivePeriod(StrEnum):

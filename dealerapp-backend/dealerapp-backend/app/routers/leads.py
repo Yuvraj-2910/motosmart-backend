@@ -7,7 +7,7 @@ never reach another branch's pipeline.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -289,6 +289,10 @@ async def convert_lead(
 
     lead.converted_customer_id = customer.id
     lead.status = LeadStatus.CLOSED_WON
+    # Credit the person doing the conversion, not the lead's assignee, and stamp
+    # the moment so the incentive stays in the month it was earned.
+    lead.converted_by_employee_id = user.employee_id
+    lead.converted_at = datetime.now(UTC)
 
     await session.commit()
     await session.refresh(lead)
