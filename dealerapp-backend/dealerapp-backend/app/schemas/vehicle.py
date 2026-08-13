@@ -92,6 +92,77 @@ class VehicleAnalyticsOut(BaseModel):
     health_flags: list[str] = Field(default_factory=list)
 
 
+class TelemetrySample(BaseModel):
+    """One reading from the rolling window the app keeps while monitoring."""
+
+    # Seconds before "now" that this sample was taken, so the server needs no
+    # clock agreement with the device.
+    age_seconds: Decimal = Field(ge=0, le=3600)
+    rpm: int | None = Field(default=None, ge=0, le=30000)
+    coolant_temp_c: Decimal | None = None
+    speed_kph: Decimal | None = Field(default=None, ge=0)
+    battery_voltage: Decimal | None = Field(default=None, ge=0)
+    throttle_position_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    fuel_level_pct: Decimal | None = Field(default=None, ge=0, le=100)
+
+
+class TelemetrySummaryRequest(BaseModel):
+    """The readings currently on the rider's dashboard.
+
+    Sent by the app rather than read from `obd_telemetry` because the dashboard
+    can be driven by a live ELM327 device whose readings were never persisted —
+    the summary must describe exactly what the rider is looking at.
+    """
+
+    rpm: int | None = Field(default=None, ge=0, le=30000)
+    coolant_temp_c: Decimal | None = None
+    speed_kph: Decimal | None = Field(default=None, ge=0)
+    battery_voltage: Decimal | None = Field(default=None, ge=0)
+    throttle_position_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    fuel_level_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    odometer_km: int | None = Field(default=None, ge=0)
+    dtc_codes: list[str] = Field(default_factory=list, max_length=20)
+    # The rule engine's own verdict, so the summary agrees with the badge the
+    # rider can already see instead of second-guessing it.
+    health_level: str | None = Field(default=None, max_length=20)
+    health_reasons: list[str] = Field(default_factory=list, max_length=20)
+
+    # The last ~minute of readings the app buffered while the monitor screen was
+    # open. Summarising a window rather than one instant lets the model talk about
+    # trends ("coolant climbed 12 C") instead of a single snapshot.
+    samples: list[TelemetrySample] = Field(default_factory=list, max_length=600)
+    window_seconds: int | None = Field(default=None, ge=0, le=3600)
+
+
+class TelemetrySummaryOut(BaseModel):
+    summary: str
+    source: str = Field(description="'bedrock' or 'fallback'")
+    # Echoed back so the UI can say what the summary was based on.
+    samples_used: int = 0
+    window_seconds: int | None = None
+    # True when the readings warrant opening a service request, which is what
+    # gates the "raise a ticket" button in the app.
+    is_actionable: bool = False
+    suggested_type: str | None = None
+    suggested_description: str | None = None
+    obd_context: str | None = Field(
+        default=None,
+        description="Readings formatted for attaching to a service request.",
+    )
+
+
+class DtcExplanationRequest(TelemetrySummaryRequest):
+    """One fault code plus the readings it appeared with."""
+
+    dtc_code: str = Field(min_length=2, max_length=16)
+    technical_description: str | None = Field(default=None, max_length=400)
+
+
+class DtcExplanationOut(BaseModel):
+    explanation: str
+    source: str = Field(description="'bedrock' or 'fallback'")
+
+
 class ObdIngestIn(BaseModel):
     vehicle_id: uuid.UUID
     recorded_at: datetime | None = None

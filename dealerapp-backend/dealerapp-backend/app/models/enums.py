@@ -73,6 +73,33 @@ class SenderType(StrEnum):
     DEALER = "DEALER"
 
 
+class TicketCategory(StrEnum):
+    """AI-assigned bucket for a service request, from the customer's own words."""
+
+    ENGINE = "ENGINE"
+    BRAKES = "BRAKES"
+    ELECTRICAL = "ELECTRICAL"
+    TRANSMISSION = "TRANSMISSION"
+    SUSPENSION = "SUSPENSION"
+    TYRES = "TYRES"
+    BODY = "BODY"
+    PERIODIC_SERVICE = "PERIODIC_SERVICE"
+    OTHER = "OTHER"
+
+
+class TicketPriority(StrEnum):
+    """How fast the desk should get to it.
+
+    URGENT is reserved for anything the rider should stop riding over - brakes,
+    steering, fuel leaks, a burning smell.
+    """
+
+    URGENT = "URGENT"
+    HIGH = "HIGH"
+    NORMAL = "NORMAL"
+    LOW = "LOW"
+
+
 class ChatRole(StrEnum):
     USER = "USER"
     ASSISTANT = "ASSISTANT"

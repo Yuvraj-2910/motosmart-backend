@@ -34,37 +34,52 @@ async def dealer_incentives(
         str | None, Query(pattern=r"^\d{4}-\d{2}$", description="YYYY-MM (default: this month)")
     ] = None,
 ) -> IncentiveSummaryOut:
-    """Reads the last computed figures.
+    """Reads the computed figures, computing them on first read if needed.
 
-    Rows come from `employee_incentives`, refreshed by
-    `POST /internal/incentives/recompute`. Employees with no computed row yet are
-    still listed at zero so the roster is complete.
+    Rows live in `employee_incentives` and are refreshed by
+    `POST /internal/incentives/recompute`. If nothing has been computed for this
+    dealer and period yet, this endpoint runs the aggregation itself rather than
+    returning a screen full of zeroes that looks like "no one sold anything" —
+    the numbers are derived from `leads`/`test_ride_bookings`, so computing them
+    on demand is cheap and always consistent with the source data.
+
+    Employees with genuinely no activity are still listed at zero so the roster
+    stays complete.
     """
     dealer_id = user.require_dealer_id()
     period = incentive_service.parse_period(month)
 
-    employees = list(
-        (
-            await session.execute(
-                select(Employee)
-                .where(Employee.dealer_id == dealer_id)
-                .order_by(Employee.name)
-            )
-        ).scalars()
-    )
-    employee_ids = [e.id for e in employees]
-
-    computed = {
-        row.employee_id: row
-        for row in (
-            await session.execute(
-                select(EmployeeIncentive).where(
-                    EmployeeIncentive.employee_id.in_(employee_ids or [uuid.uuid4()]),
-                    EmployeeIncentive.period_month == period,
+    async def load() -> tuple[list[Employee], dict[uuid.UUID, EmployeeIncentive]]:
+        employees = list(
+            (
+                await session.execute(
+                    select(Employee)
+                    .where(Employee.dealer_id == dealer_id)
+                    .order_by(Employee.name)
                 )
-            )
-        ).scalars()
-    }
+            ).scalars()
+        )
+        rows = {
+            row.employee_id: row
+            for row in (
+                await session.execute(
+                    select(EmployeeIncentive).where(
+                        EmployeeIncentive.employee_id.in_(
+                            [e.id for e in employees] or [uuid.uuid4()]
+                        ),
+                        EmployeeIncentive.period_month == period,
+                    )
+                )
+            ).scalars()
+        }
+        return employees, rows
+
+    employees, computed = await load()
+
+    if employees and not computed:
+        await incentive_service.recompute(session, month=period, dealer_id=dealer_id)
+        await session.commit()
+        employees, computed = await load()
 
     items: list[EmployeeIncentiveOut] = []
     total = Decimal("0")

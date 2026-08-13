@@ -108,13 +108,17 @@ async def seed() -> None:
                     name = next(name_cycle)
                 except StopIteration:
                     break
+                email = f"{name.split()[0].lower()}@ymsli-demo.example"
                 employee = Employee(
                     dealer_id=dealer.id,
                     name=name,
                     phone=f"+9199999{random.randint(10000, 99999)}",
-                    email=f"{name.split()[0].lower()}@ymsli-demo.example",
+                    email=email,
                     is_active=True,
-                    # cognito_sub left NULL - wire it up via AdminCreateUser separately.
+                    # Seeded as the email so AUTH_DEV_MODE's `X-Dev-User: <email>:`
+                    # header resolves to this row without a Cognito pool. Real
+                    # Cognito provisioning overwrites this with the pool's `sub`.
+                    cognito_sub=email,
                 )
                 session.add(employee)
                 employees.append(employee)
@@ -210,6 +214,7 @@ async def seed() -> None:
             phone="+919999900099",
             email="test.customer@ymsli-demo.example",
             onboarding_dealer_id=dealers[0].id,
+            cognito_sub="test.customer@ymsli-demo.example",
         )
         session.add(customer)
         await session.flush()

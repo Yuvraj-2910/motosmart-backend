@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
+    # Path to a CA bundle (e.g. RDS global-bundle.pem) for verify-full TLS.
+    # Empty = no TLS override, for plain local Postgres.
+    DB_SSL_CA_BUNDLE: str = ""
 
     # --- AWS -------------------------------------------------------------
     AWS_REGION: str = "ap-south-1"
@@ -56,6 +59,14 @@ class Settings(BaseSettings):
     BEDROCK_MODEL_ID: str = ""
     BEDROCK_MAX_TOKENS: int = 512
     BEDROCK_ENABLED: bool = True
+    # Bedrock often lives in a different region from the rest of the stack (this
+    # account is approved for us-east-1, while Cognito/RDS/S3 are in
+    # ap-northeast-2). Empty falls back to AWS_REGION.
+    BEDROCK_REGION: str = ""
+    # Bedrock API key (bearer token). boto3 reads it from
+    # AWS_BEARER_TOKEN_BEDROCK, which `core/aws.py` sets from this value. Leave
+    # empty to sign requests with the normal SigV4 credential chain instead.
+    BEDROCK_API_KEY: str = ""
 
     # --- Internal endpoints ---------------------------------------------
     # Shared secret guarding /internal/* endpoints (OBD ingest, incentive
@@ -75,6 +86,11 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+
+    @property
+    def bedrock_region(self) -> str:
+        """Region for bedrock-runtime only; everything else uses AWS_REGION."""
+        return self.BEDROCK_REGION or self.AWS_REGION
 
     @property
     def cognito_issuer(self) -> str:

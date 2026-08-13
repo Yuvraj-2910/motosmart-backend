@@ -7,14 +7,17 @@ notifies the customer (`SERVICE_REPLY`) and vice versa.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.db import SessionLocal
 from app.deps import AnyUserDep, CurrentUser, DealerUserDep, SessionDep
+from app.models.catalog import BikeModel
 from app.models.enums import (
     NotificationType,
     RecipientType,
@@ -33,7 +36,9 @@ from app.schemas.service import (
     ServiceRequestOut,
     ServiceRequestUpdate,
 )
-from app.services import notifications
+from app.services import ai, notifications
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["service-requests"])
 
@@ -94,6 +99,64 @@ async def _message_stats(
     return {rid: (int(count), last) for rid, count, last in rows.all()}
 
 
+async def _enrich(
+    session: AsyncSession, requests: list[ServiceRequest], dtos: list[ServiceRequestOut]
+) -> None:
+    """Fill in customer and vehicle identity on the DTOs, in bulk.
+
+    Three queries regardless of how long the queue is - the dealer list would
+    otherwise be one lookup per row, and the app cannot join these itself.
+    """
+    if not requests:
+        return
+
+    customers = {
+        c.id: c
+        for c in (
+            await session.execute(
+                select(Customer).where(
+                    Customer.id.in_({r.customer_id for r in requests})
+                )
+            )
+        ).scalars()
+    }
+    vehicles = {
+        v.id: v
+        for v in (
+            await session.execute(
+                select(Vehicle).where(Vehicle.id.in_({r.vehicle_id for r in requests}))
+            )
+        ).scalars()
+    }
+    model_ids = {v.bike_model_id for v in vehicles.values() if v.bike_model_id}
+    models = {}
+    if model_ids:
+        models = {
+            m.id: m
+            for m in (
+                await session.execute(
+                    select(BikeModel).where(BikeModel.id.in_(model_ids))
+                )
+            ).scalars()
+        }
+
+    for request, dto in zip(requests, dtos):
+        customer = customers.get(request.customer_id)
+        if customer is not None:
+            dto.customer_name = customer.name
+            dto.customer_phone = customer.phone
+        vehicle = vehicles.get(request.vehicle_id)
+        if vehicle is not None:
+            dto.vehicle_registration = vehicle.registration_no
+            model = models.get(vehicle.bike_model_id) if vehicle.bike_model_id else None
+            name = " ".join(
+                part for part in ((model.name if model else None), (model.variant if model else None)) if part
+            )
+            dto.vehicle_label = " · ".join(
+                part for part in (name or None, vehicle.registration_no) if part
+            ) or None
+
+
 @router.get(
     "/service-requests",
     response_model=list[ServiceRequestOut],
@@ -126,7 +189,55 @@ async def list_service_requests(
         dto.message_count = count
         dto.last_message_at = last  # type: ignore[assignment]
         out.append(dto)
+
+    await _enrich(session, rows, out)
     return out
+
+
+async def _refine_triage(
+    request_id: uuid.UUID,
+    *,
+    type_: str | None,
+    description: str | None,
+    bike_model_id: uuid.UUID | None,
+    odometer_km: int | None,
+) -> None:
+    """Upgrade a ticket's heuristic triage to the model's verdict.
+
+    Runs after the response has been sent, on its own session (the request's is
+    already closed). Failure is logged and ignored - the heuristic values stay,
+    which is why the ticket is never left unclassified.
+    """
+    try:
+        async with SessionLocal() as session:
+            # Looked up here, not on the request path: it only enriches the prompt.
+            model_name = None
+            if bike_model_id is not None:
+                model = await session.get(BikeModel, bike_model_id)
+                model_name = model.name if model else None
+
+        result = await ai.triage_service_request(
+            type_=type_,
+            description=description,
+            vehicle_label=model_name,
+            odometer_km=odometer_km,
+        )
+        if result.source != "bedrock":
+            return  # nothing better to store
+
+        async with SessionLocal() as session:
+            request = await session.get(ServiceRequest, request_id)
+            if request is None:
+                return
+            request.ai_category = result.category
+            request.ai_priority = result.priority
+            request.ai_summary = result.summary
+            await session.commit()
+        logger.info(
+            "Refined triage for %s -> %s/%s", request_id, result.category, result.priority
+        )
+    except Exception:  # noqa: BLE001 - a background task must never crash the worker
+        logger.exception("Background triage failed for %s", request_id)
 
 
 @router.post(
@@ -139,6 +250,7 @@ async def create_service_request(
     payload: ServiceRequestCreate,
     session: SessionDep,
     user: AnyUserDep,
+    background: BackgroundTasks,
 ) -> ServiceRequestDetailOut:
     """Customers raise requests for their own vehicles.
 
@@ -151,6 +263,28 @@ async def create_service_request(
     if vehicle is None or vehicle.customer_id != customer.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vehicle not found")
 
+    # Without a dealer the request would be created but invisible to every
+    # branch queue (the dealer list filters on dealer_id), so it would silently
+    # never be worked. Fail loudly instead of accepting an orphan.
+    if customer.onboarding_dealer_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Your profile is not linked to a dealer yet, so we cannot route "
+                "this request. Please contact your dealer."
+            ),
+        )
+
+    # Triage from the customer's own words plus any diagnostics the app captured.
+    # The keyword heuristic runs inline so the ticket is categorised the instant
+    # it is stored; the model refines it in the background, because a Bedrock
+    # round trip takes several seconds and nobody should watch a spinner for that.
+    triage_text = (
+        "\n".join(part for part in (payload.description, payload.obd_context) if part)
+        or None
+    )
+    triage = ai.heuristic_triage(payload.type, triage_text)
+
     request = ServiceRequest(
         vehicle_id=vehicle.id,
         customer_id=customer.id,
@@ -159,6 +293,9 @@ async def create_service_request(
         description=payload.description,
         status=ServiceRequestStatus.OPEN,
         preferred_date=payload.preferred_date,
+        ai_category=triage.category,
+        ai_priority=triage.priority,
+        ai_summary=triage.summary,
     )
     session.add(request)
     await session.flush()
@@ -174,15 +311,53 @@ async def create_service_request(
         session.add(first)
         messages.append(first)
 
+    # Diagnostics ride along as their own message so the desk can see the raw
+    # evidence without it being buried in the customer's prose.
+    if payload.obd_context:
+        diagnostics = ServiceRequestMessage(
+            service_request_id=request.id,
+            sender_type=SenderType.CUSTOMER,
+            sender_id=customer.id,
+            message=payload.obd_context,
+        )
+        session.add(diagnostics)
+        messages.append(diagnostics)
+
+    # Tell the branch a request has arrived — otherwise a new ticket sits in the
+    # queue with nothing prompting anyone to open it.
+    await notifications.notify_dealer_staff(
+        session,
+        dealer_id=request.dealer_id,
+        type=NotificationType.SERVICE_REPLY,
+        title=f"New service request from {customer.name}",
+        body=(payload.description or payload.type or "Service request")[:200],
+        payload={
+            "service_request_id": str(request.id),
+            "route": f"/dealer/tickets/{request.id}",
+        },
+    )
+
     await session.commit()
-    await session.refresh(request)
-    for message in messages:
-        await session.refresh(message)
+    # No refresh needed: the sessionmaker sets expire_on_commit=False, so the
+    # instances keep their loaded values. Each refresh would be another round
+    # trip to a database in a different region.
+
+    # Refine the triage once the customer has their confirmation screen.
+    background.add_task(
+        _refine_triage,
+        request.id,
+        type_=payload.type,
+        description=triage_text,
+        bike_model_id=vehicle.bike_model_id,
+        odometer_km=vehicle.odometer_km,
+    )
 
     out = [ServiceMessageOut.model_validate(m) for m in messages]
     for m in out:
         m.sender_name = customer.name
-    return _detail_out(request, out)
+    detail = _detail_out(request, out)
+    await _enrich(session, [request], [detail])
+    return detail
 
 
 @router.get(
@@ -205,7 +380,9 @@ async def get_service_request(
     )
 
     dto_messages = await _with_sender_names(session, messages)
-    return _detail_out(request, dto_messages)
+    detail = _detail_out(request, dto_messages)
+    await _enrich(session, [request], [detail])
+    return detail
 
 
 @router.patch(
@@ -222,8 +399,9 @@ async def update_service_request(
     request = await _authorised_request(session, request_id, user)
     request.status = payload.status
     await session.commit()
-    await session.refresh(request)
-    return ServiceRequestOut.model_validate(request)
+    dto = ServiceRequestOut.model_validate(request)
+    await _enrich(session, [request], [dto])
+    return dto
 
 
 # --- Thread ---------------------------------------------------------------
@@ -343,10 +521,26 @@ async def create_message(
                 "route": f"/customer/service/{request.id}",
             },
         )
+    elif request.dealer_id is not None:
+        # The other direction: the desk needs to know the customer answered,
+        # otherwise a thread only ever notifies one way and replies sit unseen.
+        # There is no assigned employee on a service request, so the branch's
+        # active staff are all told.
+        await notifications.notify_dealer_staff(
+            session,
+            dealer_id=request.dealer_id,
+            type=NotificationType.SERVICE_REPLY,
+            title=f"{sender_name} replied on a service request",
+            body=payload.message[:200],
+            payload={
+                "service_request_id": str(request.id),
+                "route": f"/dealer/tickets/{request.id}",
+            },
+        )
 
     await session.commit()
-    await session.refresh(message)
-
+    # expire_on_commit=False, so the row keeps its values without another
+    # round trip - which matters here, this is the chat send path.
     dto = ServiceMessageOut.model_validate(message)
     dto.sender_name = sender_name
     return dto

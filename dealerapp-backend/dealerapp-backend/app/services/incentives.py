@@ -55,6 +55,20 @@ def period_bounds(period_month: str) -> tuple[date, date]:
     return start, end
 
 
+def per_conversion_amount(amounts: dict[str, Decimal]) -> Decimal:
+    """What one closed-won lead earns.
+
+    A conversion and a sale are the same event in this data model, so pricing it
+    with LEAD_CONVERTED **and** SALE paid every conversion twice. The higher of
+    the two rules wins, which keeps a dealer's configured SALE amount meaningful
+    while letting them raise LEAD_CONVERTED above it if they want.
+    """
+    return max(
+        amounts[IncentiveEventType.SALE],
+        amounts[IncentiveEventType.LEAD_CONVERTED],
+    )
+
+
 async def _rule_amounts(
     session: AsyncSession, dealer_id: uuid.UUID
 ) -> dict[str, Decimal]:
@@ -166,13 +180,14 @@ async def recompute(
         leads_count = int(leads_created.get(employee.id, 0))
         conversions_count = int(conversions.get(employee.id, 0))
         test_rides_count = int(test_rides.get(employee.id, 0))
-        # A conversion to CLOSED_WON *is* the sale in this data model.
+        # A conversion to CLOSED_WON *is* the sale in this data model, so the
+        # count is reported under both names for the UI...
         sales_count = conversions_count
 
+        # ...but paid only once - see `per_conversion_amount`.
         total = (
-            amounts[IncentiveEventType.LEAD_CONVERTED] * conversions_count
+            per_conversion_amount(amounts) * conversions_count
             + amounts[IncentiveEventType.TEST_RIDE] * test_rides_count
-            + amounts[IncentiveEventType.SALE] * sales_count
         )
         grand_total += total
 
@@ -195,3 +210,39 @@ async def recompute(
         grand_total,
     )
     return period, len(employees), grand_total
+
+
+def _selfcheck() -> None:
+    """Self-check for the arithmetic that has no database in it.
+
+    Run with `python -m app.services.incentives`. Guards the two things here that
+    were (or could silently become) wrong: paying a conversion twice, and the
+    December rollover in the period bounds.
+    """
+    # Pay-once: defaults are LEAD_CONVERTED=500, SALE=1500 -> 1500, never 2000.
+    assert per_conversion_amount(dict(DEFAULT_AMOUNTS)) == Decimal("1500"), (
+        "a conversion must be priced once, not summed across LEAD_CONVERTED + SALE"
+    )
+
+    # A dealer may value the conversion above the sale; the higher rule wins.
+    raised = dict(DEFAULT_AMOUNTS) | {IncentiveEventType.LEAD_CONVERTED: Decimal("2500")}
+    assert per_conversion_amount(raised) == Decimal("2500")
+
+    # Period parsing and bounds, including the year boundary.
+    assert period_bounds("2026-08") == (date(2026, 8, 1), date(2026, 9, 1))
+    assert period_bounds("2026-12") == (date(2026, 12, 1), date(2027, 1, 1))
+    assert parse_period("2026-03") == "2026-03"
+    assert parse_period(None) == current_period()
+    for bad in ("2026-13", "not-a-month", "2026/03"):
+        try:
+            parse_period(bad)
+        except ValueError:
+            pass
+        else:  # pragma: no cover - only reached if validation regresses
+            raise AssertionError(f"{bad!r} should have been rejected")
+
+    print("incentives self-check: OK")
+
+
+if __name__ == "__main__":
+    _selfcheck()

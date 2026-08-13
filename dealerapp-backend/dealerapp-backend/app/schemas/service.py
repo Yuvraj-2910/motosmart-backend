@@ -7,7 +7,12 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import SenderType, ServiceRequestStatus
+from app.models.enums import (
+    SenderType,
+    ServiceRequestStatus,
+    TicketCategory,
+    TicketPriority,
+)
 from app.schemas.common import ORMModel
 
 
@@ -30,6 +35,14 @@ class ServiceRequestCreate(BaseModel):
     type: str | None = Field(default=None, max_length=80)
     description: str | None = None
     preferred_date: date | None = None
+    # Set when the request was raised from the OBD dashboard after a fault: the
+    # codes and readings are appended to the thread so the desk sees the evidence,
+    # and they feed the AI triage.
+    obd_context: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="Optional diagnostic context captured from the bike.",
+    )
 
 
 class ServiceRequestOut(ORMModel):
@@ -44,6 +57,20 @@ class ServiceRequestOut(ORMModel):
     created_at: datetime
     message_count: int = 0
     last_message_at: datetime | None = None
+
+    # AI triage of the customer's description, assigned on creation. Null when
+    # classification could not run - the ticket is still valid.
+    ai_category: TicketCategory | None = None
+    ai_priority: TicketPriority | None = None
+    ai_summary: str | None = None
+
+    # Denormalised identity of who raised it and on what. The dealer queue needs
+    # a name and a vehicle to be usable, and joining it here saves the app an
+    # N+1 lookup it has no way to do (it cannot read the customers table).
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    vehicle_label: str | None = None
+    vehicle_registration: str | None = None
 
 
 class ServiceRequestDetailOut(ServiceRequestOut):

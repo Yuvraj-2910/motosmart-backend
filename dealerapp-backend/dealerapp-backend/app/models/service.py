@@ -37,6 +37,12 @@ class ServiceRequest(Base, TimestampsMixin):
     )
     preferred_date: Mapped[date | None] = mapped_column(Date)
 
+    # AI triage of the customer's own description, filled in on creation. Nullable
+    # because classification is best-effort - a ticket is never blocked on it.
+    ai_category: Mapped[str | None] = mapped_column(String(30))
+    ai_priority: Mapped[str | None] = mapped_column(String(20))
+    ai_summary: Mapped[str | None] = mapped_column(Text)
+
     messages: Mapped[list["ServiceRequestMessage"]] = relationship(
         back_populates="request",
         cascade="all, delete-orphan",

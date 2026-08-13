@@ -5,7 +5,8 @@ asyncpg==0.30.0
 alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
-boto3==1.35.90
+# >=1.40 for Bedrock API key (bearer token) support via AWS_BEARER_TOKEN_BEDROCK.
+boto3==1.43.70
 python-jose[cryptography]==3.3.0
 httpx==0.28.1
 email-validator==2.2.0

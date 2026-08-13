@@ -11,7 +11,11 @@ from app.deps import DealerUserDep, SessionDep
 from app.models.engagement import Notification, TestRideBooking
 from app.models.enums import LeadStatus, RecipientType, TestRideStatus
 from app.models.lead import Lead, LeadFollowup
-from app.schemas.lead import DashboardSummaryOut
+from app.schemas.lead import (
+    DashboardSummaryOut,
+    FollowupWithLeadOut,
+    LeadFollowupOut,
+)
 
 router = APIRouter(tags=["dashboard"])
 
@@ -94,6 +98,45 @@ async def dashboard_summary(
         ).scalar_one()
     )
 
+    # Leads closed (won or lost) since the 1st of the current month.
+    closed_this_month = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(Lead)
+                .where(
+                    Lead.dealer_id == dealer_id,
+                    Lead.status.in_((LeadStatus.CLOSED_WON, LeadStatus.CLOSED_LOST)),
+                    Lead.updated_at >= today.replace(day=1),
+                )
+            )
+        ).scalar_one()
+    )
+
+    # The rows behind `todays_followups`, joined to their lead so the home
+    # screen can render a worklist rather than just a number.
+    followup_rows = (
+        await session.execute(
+            select(LeadFollowup, Lead.customer_name, Lead.mobile)
+            .join(Lead, Lead.id == LeadFollowup.lead_id)
+            .where(
+                Lead.dealer_id == dealer_id,
+                LeadFollowup.completed.is_(False),
+                LeadFollowup.scheduled_date <= today,
+            )
+            .order_by(LeadFollowup.scheduled_date)
+            .limit(50)
+        )
+    ).all()
+    todays_followup_items = [
+        FollowupWithLeadOut(
+            followup=LeadFollowupOut.model_validate(followup),
+            lead_customer_name=customer_name,
+            lead_mobile=mobile,
+        )
+        for followup, customer_name, mobile in followup_rows
+    ]
+
     unread_notifications = 0
     if user.employee_id:
         unread_notifications = int(
@@ -116,6 +159,8 @@ async def dashboard_summary(
         overdue_followups=overdue_followups,
         open_leads=open_leads,
         new_leads=leads_by_status.get(str(LeadStatus.NEW), 0),
+        closed_this_month=closed_this_month,
+        todays_followup_items=todays_followup_items,
         leads_by_status=leads_by_status,
         leads_by_intent=leads_by_intent,
         pending_test_rides=pending_test_rides,

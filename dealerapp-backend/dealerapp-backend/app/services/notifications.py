@@ -17,12 +17,14 @@ import uuid
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import aws
 from app.core.config import settings
 from app.models.engagement import Notification
 from app.models.enums import NotificationType, RecipientType
+from app.models.org import Employee
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,67 @@ async def notify(
         "Notification queued type=%s recipient=%s:%s", type, recipient_type, recipient_id
     )
     return notification
+
+
+async def notify_dealer_staff(
+    session: AsyncSession,
+    *,
+    dealer_id: uuid.UUID,
+    type: NotificationType,
+    title: str,
+    body: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> list[Notification]:
+    """Fan a notification out to every active employee at a dealer.
+
+    Used for events that belong to the branch rather than to one salesperson —
+    a customer message on a service thread, for instance. `service_requests` has
+    no assigned employee, so there is no single correct recipient and the whole
+    desk is told; whoever picks it up marks it read.
+
+    Returns the rows created (empty when the branch has no active staff, which is
+    not an error — the request still stands and stays visible in the queue).
+    """
+    employees = list(
+        (
+            await session.execute(
+                select(Employee).where(
+                    Employee.dealer_id == dealer_id,
+                    Employee.is_active.is_(True),
+                )
+            )
+        ).scalars()
+    )
+    if not employees:
+        logger.warning(
+            "No active staff at dealer %s to notify about %s", dealer_id, type
+        )
+        return []
+
+    # Built directly rather than via `notify()` so the whole fan-out costs one
+    # flush instead of one per employee - the database is a region away, so each
+    # extra round trip is ~250ms on the customer's request.
+    rows = [
+        Notification(
+            recipient_type=RecipientType.EMPLOYEE,
+            recipient_id=employee.id,
+            type=type,
+            title=title,
+            body=body,
+            payload_json=payload or {},
+            is_read=False,
+        )
+        for employee in employees
+    ]
+    session.add_all(rows)
+    await session.flush()
+    logger.info(
+        "Notification fanned out type=%s dealer=%s recipients=%d",
+        type,
+        dealer_id,
+        len(rows),
+    )
+    return rows
 
 
 async def send_sms(phone: str | None, message: str) -> bool:

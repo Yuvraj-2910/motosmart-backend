@@ -9,6 +9,7 @@ call sites wrap invocations in `run_in_threadpool` (see `app.core.aws.call`).
 from __future__ import annotations
 
 import logging
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -20,18 +21,26 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_BOTO_CONFIG = Config(
-    region_name=settings.AWS_REGION,
-    retries={"max_attempts": 3, "mode": "standard"},
-    connect_timeout=5,
-    read_timeout=30,
-)
+
+def _config_for(region: str) -> Config:
+    return Config(
+        region_name=region,
+        retries={"max_attempts": 3, "mode": "standard"},
+        connect_timeout=5,
+        read_timeout=30,
+    )
+
+
+_BOTO_CONFIG = _config_for(settings.AWS_REGION)
 
 
 @lru_cache
-def _client(service: str) -> Any:
-    logger.debug("Creating boto3 client for %s", service)
-    return boto3.client(service, config=_BOTO_CONFIG)
+def _client(service: str, region: str | None = None) -> Any:
+    """Cached boto3 client. `region` is only passed when a service needs to talk
+    to a region other than AWS_REGION (Bedrock does — see `bedrock_client`)."""
+    logger.debug("Creating boto3 client for %s in %s", service, region or settings.AWS_REGION)
+    config = _BOTO_CONFIG if region is None else _config_for(region)
+    return boto3.client(service, config=config)
 
 
 def cognito_client() -> Any:
@@ -51,7 +60,16 @@ def sns_client() -> Any:
 
 
 def bedrock_client() -> Any:
-    return _client("bedrock-runtime")
+    """Bedrock runtime, in its own region and optionally key-authenticated.
+
+    A Bedrock API key is a bearer token that botocore picks up from
+    `AWS_BEARER_TOKEN_BEDROCK`; there is no client kwarg for it, so the value is
+    exported here before the client is built. Note it authenticates as the IAM
+    principal that minted it, so it grants no permissions that principal lacks.
+    """
+    if settings.BEDROCK_API_KEY and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = settings.BEDROCK_API_KEY
+    return _client("bedrock-runtime", settings.bedrock_region)
 
 
 async def call(fn: Any, /, *args: Any, **kwargs: Any) -> Any:

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.models.enums import AiIntent, LeadSource, LeadStatus
 from app.schemas.catalog import BikeModelOut
 from app.schemas.common import ORMModel, Warning_
+from app.schemas.org import CustomerOut
 
 
 class LeadFollowupOut(ORMModel):
@@ -124,7 +125,17 @@ class LeadConvertRequest(BaseModel):
 class LeadConvertResponse(BaseModel):
     lead: LeadOut
     customer_id: uuid.UUID
+    # The full row, so the app can render the new customer without a second fetch.
+    customer: CustomerOut | None = None
     invited: bool = False
+
+
+class FollowupWithLeadOut(BaseModel):
+    """A due follow-up joined with the identity the dashboard needs to show it."""
+
+    followup: LeadFollowupOut
+    lead_customer_name: str
+    lead_mobile: str
 
 
 class DashboardSummaryOut(BaseModel):
@@ -133,11 +144,15 @@ class DashboardSummaryOut(BaseModel):
     overdue_followups: int
     open_leads: int
     new_leads: int
+    closed_this_month: int = 0
     leads_by_status: dict[str, int]
     leads_by_intent: dict[str, int]
     pending_test_rides: int = 0
     unread_notifications: int = 0
     my_open_leads: int = 0
+    # The actual rows behind `todays_followups`, so the home screen can list
+    # them instead of only showing a count.
+    todays_followup_items: list[FollowupWithLeadOut] = Field(default_factory=list)
 
 
 class ClassifyLeadRequest(BaseModel):

@@ -25,6 +25,7 @@ from app.models.enums import (
 from app.models.lead import Lead, LeadFollowup
 from app.models.org import Customer, Employee
 from app.schemas.common import Message
+from app.schemas.org import CustomerOut
 from app.schemas.lead import (
     LeadConvertRequest,
     LeadConvertResponse,
@@ -246,7 +247,12 @@ async def convert_lead(
 
     if lead.converted_customer_id is not None:
         enriched = (await enrich_leads(session, [lead]))[0]
-        return LeadConvertResponse(lead=enriched, customer_id=lead.converted_customer_id)
+        existing = await session.get(Customer, lead.converted_customer_id)
+        return LeadConvertResponse(
+            lead=enriched,
+            customer_id=lead.converted_customer_id,
+            customer=CustomerOut.model_validate(existing) if existing else None,
+        )
 
     name = payload.name or lead.customer_name
     phone = payload.phone or lead.mobile
@@ -288,7 +294,12 @@ async def convert_lead(
     await session.refresh(lead)
 
     enriched = (await enrich_leads(session, [lead]))[0]
-    return LeadConvertResponse(lead=enriched, customer_id=customer.id, invited=invited)
+    return LeadConvertResponse(
+        lead=enriched,
+        customer_id=customer.id,
+        customer=CustomerOut.model_validate(customer),
+        invited=invited,
+    )
 
 
 # --- Follow-ups -----------------------------------------------------------
