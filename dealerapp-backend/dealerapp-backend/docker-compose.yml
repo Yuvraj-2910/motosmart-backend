@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: dealerapp
+      POSTGRES_PASSWORD: dealerapp
+      POSTGRES_DB: dealerapp
+    ports:
+      - "5432:5432"
+    volumes:
+      - dealerapp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dealerapp -d dealerapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dealerapp:dealerapp@db:5432/dealerapp
+      ENVIRONMENT: development
+      LOG_LEVEL: INFO
+      CORS_ORIGINS: http://localhost:3000,http://localhost:8080,http://127.0.0.1:8080
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
+      COGNITO_APP_CLIENT_ID: ${COGNITO_APP_CLIENT_ID:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      SES_FROM_EMAIL: ${SES_FROM_EMAIL:-}
+      SNS_SMS_ENABLED: ${SNS_SMS_ENABLED:-false}
+      BEDROCK_MODEL_ID: ${BEDROCK_MODEL_ID:-}
+      BEDROCK_ENABLED: ${BEDROCK_ENABLED:-true}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev-internal-key}
+      # Bypasses Cognito locally: send `X-Dev-User: <sub>:DEALER_STAFF` (or
+      # `:CUSTOMER`) instead of a real bearer token. Never enable in prod.
+      AUTH_DEV_MODE: ${AUTH_DEV_MODE:-true}
+    volumes:
+      - ./app:/srv/app
+      - ./alembic:/srv/alembic
+      - ./scripts:/srv/scripts
+    # AWS calls (boto3) still need real credentials if you exercise Cognito/S3/
+    # SES/SNS/Bedrock locally - mount ~/.aws or export AWS_* env vars as usual.
+
+volumes:
+  dealerapp_pgdata:
