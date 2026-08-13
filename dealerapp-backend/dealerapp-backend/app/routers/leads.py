@@ -246,12 +246,35 @@ async def convert_lead(
     lead = await _get_lead_for_dealer(session, lead_id, dealer_id)
 
     if lead.converted_customer_id is not None:
-        enriched = (await enrich_leads(session, [lead]))[0]
         existing = await session.get(Customer, lead.converted_customer_id)
+
+        # Converting again is the retry. If provisioning failed the first time —
+        # Cognito was unreachable, the mobile was unusable — the customer has no
+        # login and no other screen offers a way to ask for one again. Returning
+        # early without retrying strands them permanently.
+        retried = False
+        retry_error: str | None = None
+        if payload.invite and existing is not None and not existing.cognito_sub:
+            if payload.email and existing.email != payload.email:
+                existing.email = payload.email
+            result = await cognito.provision_customer(
+                email=existing.email, phone=existing.phone, name=existing.name
+            )
+            retried = result.ok
+            retry_error = result.error
+            if result.ok and result.cognito_sub:
+                existing.cognito_sub = result.cognito_sub
+            await session.commit()
+            await session.refresh(existing)
+
+        enriched = (await enrich_leads(session, [lead]))[0]
         return LeadConvertResponse(
             lead=enriched,
             customer_id=lead.converted_customer_id,
             customer=CustomerOut.model_validate(existing) if existing else None,
+            # Already having a login counts as invited; nothing was left undone.
+            invited=retried or bool(existing and existing.cognito_sub),
+            invite_error=retry_error,
         )
 
     name = payload.name or lead.customer_name

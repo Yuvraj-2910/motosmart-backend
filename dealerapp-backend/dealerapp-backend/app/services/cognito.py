@@ -115,10 +115,20 @@ async def provision_customer(
                 return ProvisionResult(True, cognito_sub=sub)
             return ProvisionResult(False, error="User exists but could not be read")
         logger.warning("AdminCreateUser failed for %s: %s", _mask(username), exc)
-        return ProvisionResult(False, error=f"Cognito error: {code}")
+        return ProvisionResult(
+            False, error=f"Cognito rejected the login ({code}). Convert again to retry."
+        )
     except BotoCoreError as exc:
-        logger.warning("AdminCreateUser transport error: %s", exc)
-        return ProvisionResult(False, error="Cognito unreachable")
+        # Name the failure. "Cognito unreachable" covers expired credentials, a
+        # DNS failure and a read timeout alike, and the dealer reporting it
+        # cannot tell which — nor could anyone reading the log afterwards.
+        logger.warning(
+            "AdminCreateUser transport error for %s: %s: %s",
+            _mask(username), type(exc).__name__, exc,
+        )
+        return ProvisionResult(
+            False, error=f"Could not reach Cognito ({type(exc).__name__}). Convert again to retry."
+        )
 
     await _add_to_group(username)
     return ProvisionResult(True, cognito_sub=sub)
