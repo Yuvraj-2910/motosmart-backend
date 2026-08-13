@@ -11,6 +11,7 @@ raised — a customer row must still be created even if the pool is unreachable.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -29,10 +30,35 @@ class ProvisionResult:
     error: str | None = None
 
 
+def to_e164(phone: str | None) -> str | None:
+    """Coerce a number to the E.164 form Cognito's schema demands.
+
+    Leads are typed in by hand, so a mobile arrives as `9464674949` as often as
+    `+919464674949`, and Cognito rejects the bare form outright. A ten-digit
+    number is assumed Indian, which is what this dealer network is. Anything
+    that is not recognisably a phone number returns None rather than a guess —
+    a wrong number silently attached to a login is worse than a refused invite.
+    """
+    if not phone:
+        return None
+    digits = re.sub(r"[^\d+]", "", phone)
+    if digits.startswith("+"):
+        return digits if 11 <= len(digits) <= 16 else None
+    if len(digits) == 10:
+        return f"+91{digits}"
+    if len(digits) == 12 and digits.startswith("91"):
+        return f"+{digits}"
+    return None
+
+
 async def provision_customer(
     *, email: str | None, phone: str | None, name: str
 ) -> ProvisionResult:
-    """Create a Cognito user in the CUSTOMER group and send the OTP invite."""
+    """Create a Cognito user in the CUSTOMER group so they can sign in by OTP.
+
+    Idempotent: an existing user is reused and its `sub` returned, so converting
+    the same person twice never fails and never orphans a login.
+    """
     if not settings.COGNITO_USER_POOL_ID:
         return ProvisionResult(False, error="Cognito user pool is not configured")
 
@@ -46,11 +72,25 @@ async def provision_customer(
             {"Name": "email", "Value": email},
             {"Name": "email_verified", "Value": "true"},
         ]
-    if phone:
-        attributes += [
-            {"Name": "phone_number", "Value": phone},
-            {"Name": "phone_number_verified", "Value": "true"},
-        ]
+
+    # The pool marks phone_number required, so a customer cannot be created
+    # without one — report that plainly instead of letting Cognito reject the
+    # whole call with a schema error the dealer cannot act on.
+    e164 = to_e164(phone)
+    if e164 is None:
+        return ProvisionResult(
+            False,
+            error=(
+                f"{phone!r} is not a usable mobile number. Fix it on the lead and "
+                "convert again to give this customer a login."
+                if phone
+                else "A mobile number is required to create a customer login."
+            ),
+        )
+    attributes += [
+        {"Name": "phone_number", "Value": e164},
+        {"Name": "phone_number_verified", "Value": "true"},
+    ]
 
     client = aws.cognito_client()
     try:
@@ -59,7 +99,10 @@ async def provision_customer(
             UserPoolId=settings.COGNITO_USER_POOL_ID,
             Username=username,
             UserAttributes=attributes,
-            DesiredDeliveryMediums=["EMAIL"] if email else ["SMS"],
+            # No invite mail: sign-in is passwordless, so the temporary password
+            # Cognito would email is noise the customer cannot use. They get a
+            # code when they actually try to sign in.
+            MessageAction="SUPPRESS",
         )
         sub = _extract_sub(response.get("User", {}))
     except ClientError as exc:

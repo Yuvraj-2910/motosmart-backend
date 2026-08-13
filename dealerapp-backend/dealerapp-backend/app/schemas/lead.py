@@ -118,7 +118,12 @@ class LeadConvertRequest(BaseModel):
     phone: str | None = Field(default=None, description="Defaults to the lead's mobile.")
     email: str | None = None
     invite: bool = Field(
-        default=False, description="Provision a Cognito CUSTOMER login and send an OTP invite."
+        default=True,
+        description=(
+            "Provision a Cognito CUSTOMER login so they can sign in by OTP. "
+            "Defaults on: a converted customer who cannot sign in is not "
+            "onboarded. Pass false to record the customer without a login."
+        ),
     )
 
 
@@ -127,7 +132,10 @@ class LeadConvertResponse(BaseModel):
     customer_id: uuid.UUID
     # The full row, so the app can render the new customer without a second fetch.
     customer: CustomerOut | None = None
+    # Whether the customer got a working login. False with a reason means the
+    # row was still created — conversion never fails because Cognito did.
     invited: bool = False
+    invite_error: str | None = None
 
 
 class FollowupWithLeadOut(BaseModel):

@@ -278,13 +278,26 @@ async def convert_lead(
         session.add(customer)
         await session.flush()
 
+    # The email is the login, so the row and Cognito must never disagree. When an
+    # existing customer is reused by phone, a newly supplied email replaces the
+    # stored one rather than provisioning a login the dealer cannot see.
+    if payload.email and customer.email != payload.email:
+        customer.email = payload.email
+
+    # Give them a login unless the caller opted out. Without this the customer
+    # exists only in our database: Cognito has never heard of the email, so
+    # asking for a sign-in code silently delivers nothing.
     invited = False
+    invite_error: str | None = None
     if payload.invite:
         result = await cognito.provision_customer(
-            email=payload.email, phone=phone, name=name
+            email=customer.email, phone=customer.phone or phone, name=name
         )
         invited = result.ok
+        invite_error = result.error
         if result.ok and result.cognito_sub and not customer.cognito_sub:
+            # Without the sub, a verified token cannot be mapped back to this
+            # row and every authenticated call 403s.
             customer.cognito_sub = result.cognito_sub
 
     lead.converted_customer_id = customer.id
@@ -303,6 +316,7 @@ async def convert_lead(
         customer_id=customer.id,
         customer=CustomerOut.model_validate(customer),
         invited=invited,
+        invite_error=invite_error,
     )
 
 

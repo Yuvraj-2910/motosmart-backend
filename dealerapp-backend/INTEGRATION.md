@@ -253,6 +253,33 @@ curl -X POST localhost:8000/api/v1/internal/incentives/recompute \
 the screen is never blank. `python -m app.services.incentives` checks the
 arithmetic with no database.
 
+## Converted customers can sign in
+
+Converting a lead provisions a Cognito user in the `CUSTOMER` group and links its
+`sub` to the `customers` row. Both halves matter: without the user, asking for a
+sign-in code delivers nothing; without the `sub`, a verified token cannot be
+mapped back to the row and every authenticated call 403s.
+
+Three things made this silently fail:
+
+| Cause | Fix |
+|---|---|
+| `invite` defaulted to **false** and the app never sent it, so `provision_customer` never ran | default is now **true** — pass `invite: false` to record a customer without a login |
+| The pool marks `phone_number` **required**, and hand-typed leads carry `9464674949`, not E.164 | `cognito.to_e164()` normalises; a ten-digit number is assumed Indian, an unrecognisable one is refused with a readable reason rather than a schema error |
+| `invited` was computed and then discarded from the response | returned, alongside `invite_error`, and shown in the convert dialog |
+
+Conversion never fails because Cognito did — the customer row is created either
+way, and `invited: false` with a reason tells the dealer they have a customer who
+cannot yet sign in. `AdminCreateUser` uses `MessageAction=SUPPRESS`: sign-in is
+passwordless, so the temporary password Cognito would email is unusable noise.
+
+Customers converted before this defaulted on have no login. Backfill them:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m scripts.backfill_customer_logins          # dry run
+PYTHONPATH=. .venv/bin/python -m scripts.backfill_customer_logins --apply
+```
+
 ## Gotchas
 
 - **CORS**: allowed origins are `localhost:3000/8080` and `127.0.0.1:8080`. A
