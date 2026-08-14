@@ -22,12 +22,26 @@ cd motosmart-app2.0
 flutter run -d chrome --web-port=8080
 ```
 
-Log in with a seeded account — any OTP is accepted in dev-auth mode:
+Log in with a seeded account. The demo set is deliberately minimal — 2 dealers ×
+1 employee, 3 customers, 4 leads, 1 open ticket — and is reseeded by
+`python -m scripts.demo_reset` (this **wipes** dealers/employees/customers/leads/
+vehicles/tickets; the bike catalog and exchange-value rows survive).
 
-| Role | Identifier |
-|---|---|
-| Dealer staff | `rohan@ymsli-demo.example` (also priya/arjun/sneha/vikram) |
-| Customer | `test.customer@ymsli-demo.example` |
+| Role | Identifier | Sign-in |
+|---|---|---|
+| Dealer staff — Rohan Mehta (Andheri) | `ijklmnop7417@gmail.com` | **real Cognito email OTP** |
+| Dealer staff — Priya Nair (Whitefield) | `priya@ymsli-demo.example` | dev header |
+| Customer — Vyom Sharma (Andheri) | `vyom5212@gmail.com` | **real Cognito email OTP** |
+| Customer — Amit Kumar (Andheri) | `amit@ymsli-demo.example` | dev header |
+| Customer — Neha Sharma (Whitefield) | `neha@ymsli-demo.example` | dev header |
+
+Any OTP is accepted for the dev-header accounts. The two real accounts get a
+genuine code **by email** — `EMAIL_OTP` is the pool's only first auth factor for
+them, so `InitiateAuth`/`USER_AUTH` returns that challenge directly with no
+`SELECT_CHALLENGE` step. Their `cognito_sub` is a real Cognito `sub`, not an
+email, so the dev header for them is the sub
+(`94080dfc-b091-70a5-8b52-bef6f44bf966` and
+`84e8ddbc-2001-7037-cc8e-d9808f24ac5f`) rather than the address.
 
 To go back to the offline demo data: `--dart-define=USE_MOCK_DATA=true`.
 
@@ -71,8 +85,34 @@ Two modes, chosen by `Env.authDevMode` (default **true**):
   than adding `amplify_flutter`; PLAN_frontend.md allows either. Requires pool
   users whose `sub` matches `employees.cognito_sub`.
 
-`scripts/seed.py` seeds `cognito_sub` with each account's email, which is what
-makes the dev shortcut resolve. Existing rows were backfilled.
+`scripts/demo_reset.py` seeds `cognito_sub` with each account's email, which is
+what makes the dev shortcut resolve — except for the two real-OTP accounts, whose
+`cognito_sub` is the pool's `sub` so a verified token maps back to the row.
+
+## Dealer chatbot (staff assistant)
+
+The staff-side twin of the customer chatbot: `POST /dealer/chatbot/message` and
+`GET /dealer/chatbot/history`, same envelope (`{conversation_id, user_message,
+assistant_message, source}`), same fallback-on-Bedrock-failure discipline, one
+conversation per principal. `DEALER_STAFF` only.
+
+What differs is the context. The customer bot needs one vehicle's state; a dealer
+can ask about *any* lead or ticket at their branch, and there is no single row to
+hand the model. So `services/dealer_chat_context.py` assembles a bounded snapshot
+— status counts, follow-ups overdue/due today, the 15 most recently updated leads
+and tickets — plus a keyword search over the names and numbers the dealer's own
+message mentions, so an older record that falls outside the "recent" window is
+still reachable. Stop words are filtered, or a question like "what is the status
+of this lead" would match half the pipeline.
+
+It is **read-only and branch-scoped**: it answers, it never mutates, and Andheri
+staff cannot see Whitefield's rows. The system prompt forbids inventing a lead,
+customer, status, or phone number not in the context — an unknown record gets
+"I don't have that record, check the Leads screen" rather than a guess.
+
+Tables are `dealer_chatbot_conversations` / `dealer_chatbot_messages` (migration
+`0007_dealer_chatbot`), keyed on `employee_id`, kept separate from the customer
+chat tables so the two transcripts never mix.
 
 ## Contract mismatches that were fixed
 
@@ -94,7 +134,8 @@ These were real and would each have crashed or silently misrendered:
 ## AI (Bedrock)
 
 Live on **Claude Sonnet 5**, verified end to end — lead intent classification,
-the customer chatbot, and follow-up suggestions all report `source: "bedrock"`.
+the customer chatbot, the dealer chatbot, and follow-up suggestions all report
+`source: "bedrock"`.
 
 ```
 BEDROCK_ENABLED=true
