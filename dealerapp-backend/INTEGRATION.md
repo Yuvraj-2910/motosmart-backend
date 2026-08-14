@@ -253,6 +253,24 @@ curl -X POST localhost:8000/api/v1/internal/incentives/recompute \
 the screen is never blank. `python -m app.services.incentives` checks the
 arithmetic with no database.
 
+## Converted customers can use the app
+
+Conversion has to produce an account that works, which means two things beyond
+the `customers` row.
+
+**A login.** See below.
+
+**A bike.** Without a vehicle the customer account is inert: the garage reads
+"Garage empty", there is nothing for the OBD dongle to pair against, and a
+service request has no subject. The lead already records `interested_model_id`,
+so conversion carries it into a `vehicles` row rather than asking the dealer to
+re-enter what they captured at enquiry. The convert screen shows that model for
+confirmation and takes an optional registration number; a lead that never named
+a model opens the picker unanswered.
+
+Only ever the first vehicle — a customer who already owns one keeps it, so
+converting twice never fabricates a second bike.
+
 ## Converted customers can sign in
 
 Converting a lead provisions a Cognito user in the `CUSTOMER` group and links its
@@ -272,6 +290,10 @@ Conversion never fails because Cognito did — the customer row is created eithe
 way, and `invited: false` with a reason tells the dealer they have a customer who
 cannot yet sign in. `AdminCreateUser` uses `MessageAction=SUPPRESS`: sign-in is
 passwordless, so the temporary password Cognito would email is unusable noise.
+
+Converting an already-converted lead is the retry for both halves: a customer
+left without a `cognito_sub` or without a vehicle gets them on the second
+attempt, since no other screen offers a way to ask.
 
 Customers converted before this defaulted on have no login. Backfill them:
 

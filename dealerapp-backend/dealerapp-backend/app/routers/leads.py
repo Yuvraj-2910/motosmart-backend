@@ -24,6 +24,7 @@ from app.models.enums import (
 )
 from app.models.lead import Lead, LeadFollowup
 from app.models.org import Customer, Employee
+from app.models.vehicle import Vehicle
 from app.schemas.common import Message
 from app.schemas.org import CustomerOut
 from app.schemas.lead import (
@@ -226,6 +227,46 @@ async def update_lead(
     return await enrich_lead_detail(session, lead, followups)
 
 
+
+
+async def _ensure_vehicle(
+    session: AsyncSession,
+    customer: Customer,
+    lead: Lead,
+    payload: LeadConvertRequest,
+) -> uuid.UUID | None:
+    """Put the bike they came in for into the customer's garage.
+
+    Without a vehicle the app has nothing to work on: the garage reads "empty",
+    there is nothing to pair the OBD dongle to, and a service request has no
+    subject to be about. The lead already records the model, so conversion
+    carries it over instead of asking the dealer to re-enter it.
+
+    Only ever adds the first vehicle. A customer who already owns one keeps it —
+    conversion must never fabricate a second bike.
+    """
+    existing = (
+        await session.execute(
+            select(Vehicle.id).where(Vehicle.customer_id == customer.id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    model_id = payload.bike_model_id or lead.interested_model_id
+    if model_id is None and not payload.registration_no:
+        # Nothing identifies a bike, so an empty row would only be noise.
+        return None
+
+    vehicle = Vehicle(
+        customer_id=customer.id,
+        bike_model_id=model_id,
+        registration_no=payload.registration_no,
+    )
+    session.add(vehicle)
+    await session.flush()
+    return vehicle.id
+
 @router.post(
     "/leads/{lead_id}/convert",
     response_model=LeadConvertResponse,
@@ -267,11 +308,19 @@ async def convert_lead(
             await session.commit()
             await session.refresh(existing)
 
+        # Same retry logic for the garage: an earlier conversion predating this
+        # may have left them with no bike at all.
+        vehicle_id = None
+        if existing is not None:
+            vehicle_id = await _ensure_vehicle(session, existing, lead, payload)
+            await session.commit()
+
         enriched = (await enrich_leads(session, [lead]))[0]
         return LeadConvertResponse(
             lead=enriched,
             customer_id=lead.converted_customer_id,
             customer=CustomerOut.model_validate(existing) if existing else None,
+            vehicle_id=vehicle_id,
             # Already having a login counts as invited; nothing was left undone.
             invited=retried or bool(existing and existing.cognito_sub),
             invite_error=retry_error,
@@ -323,6 +372,8 @@ async def convert_lead(
             # row and every authenticated call 403s.
             customer.cognito_sub = result.cognito_sub
 
+    vehicle_id = await _ensure_vehicle(session, customer, lead, payload)
+
     lead.converted_customer_id = customer.id
     lead.status = LeadStatus.CLOSED_WON
     # Credit the person doing the conversion, not the lead's assignee, and stamp
@@ -340,6 +391,7 @@ async def convert_lead(
         customer=CustomerOut.model_validate(customer),
         invited=invited,
         invite_error=invite_error,
+        vehicle_id=vehicle_id,
     )
 
 

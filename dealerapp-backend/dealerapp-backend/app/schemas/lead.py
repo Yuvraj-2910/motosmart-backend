@@ -117,6 +117,15 @@ class LeadConvertRequest(BaseModel):
     )
     phone: str | None = Field(default=None, description="Defaults to the lead's mobile.")
     email: str | None = None
+    registration_no: str | None = Field(
+        default=None,
+        description="Number plate, if the bike is already registered. Optional.",
+        max_length=20,
+    )
+    bike_model_id: uuid.UUID | None = Field(
+        default=None,
+        description="Overrides the lead's interested model when the bike sold differs.",
+    )
     invite: bool = Field(
         default=True,
         description=(
@@ -136,6 +145,9 @@ class LeadConvertResponse(BaseModel):
     # row was still created — conversion never fails because Cognito did.
     invited: bool = False
     invite_error: str | None = None
+    # The bike put in their garage. Null when the lead named no model and the
+    # dealer supplied none — the customer then has nothing to service or pair.
+    vehicle_id: uuid.UUID | None = None
 
 
 class FollowupWithLeadOut(BaseModel):
