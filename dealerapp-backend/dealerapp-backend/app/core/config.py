@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     # empty to sign requests with the normal SigV4 credential chain instead.
     BEDROCK_API_KEY: str = ""
 
+    # Transcribe (voice-note dictation for lead/follow-up notes)
+    TRANSCRIBE_ENABLED: bool = True
+    # Fixed language, skipping auto-detection: short clips (a few seconds) often
+    # don't give language ID enough audio to work reliably. Clear this to fall
+    # back to auto-detecting between TRANSCRIBE_LANGUAGE_OPTIONS instead.
+    TRANSCRIBE_LANGUAGE_CODE: str = "en-IN"
+    TRANSCRIBE_LANGUAGE_OPTIONS: str = "en-IN,hi-IN"
+    # Batch jobs have fixed startup overhead; this bounds how long the request
+    # blocks the caller before giving up and returning an error.
+    TRANSCRIBE_MAX_POLL_SECONDS: int = 45
+    TRANSCRIBE_MAX_AUDIO_MB: int = 10
+
     # --- Internal endpoints ---------------------------------------------
     # Shared secret guarding /internal/* endpoints (OBD ingest, incentive
     # recompute). These are demo/ops hooks, not public API surface.

@@ -59,6 +59,10 @@ def sns_client() -> Any:
     return _client("sns")
 
 
+def transcribe_client() -> Any:
+    return _client("transcribe")
+
+
 def bedrock_client() -> Any:
     """Bedrock runtime, in its own region and optionally key-authenticated.
 
@@ -105,3 +109,7 @@ def get_sns() -> Any:
 
 def get_bedrock() -> Any:
     return bedrock_client()
+
+
+def get_transcribe() -> Any:
+    return transcribe_client()
