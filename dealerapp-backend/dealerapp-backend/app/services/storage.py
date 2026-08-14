@@ -85,16 +85,19 @@ async def presign_upload(
     return url, key, expires
 
 
-async def put_object(*, key: str, data: bytes, content_type: str) -> None:
+async def put_object(
+    *, key: str, data: bytes, content_type: str, bucket: str | None = None
+) -> None:
     """Upload bytes the server already holds (as opposed to a presigned client PUT)."""
-    if not settings.S3_BUCKET:
+    bucket = bucket or settings.S3_BUCKET
+    if not bucket:
         raise StorageError("S3_BUCKET is not configured")
 
     try:
         client = aws.s3_client()
         await aws.call(
             client.put_object,
-            Bucket=settings.S3_BUCKET,
+            Bucket=bucket,
             Key=key,
             Body=data,
             ContentType=content_type,
@@ -104,28 +107,30 @@ async def put_object(*, key: str, data: bytes, content_type: str) -> None:
         raise StorageError("Could not upload the object") from exc
 
 
-async def delete_object(key: str) -> None:
+async def delete_object(key: str, *, bucket: str | None = None) -> None:
     """Best-effort delete. Callers should not fail their request over this."""
-    if not settings.S3_BUCKET:
+    bucket = bucket or settings.S3_BUCKET
+    if not bucket:
         return
     try:
         client = aws.s3_client()
-        await aws.call(client.delete_object, Bucket=settings.S3_BUCKET, Key=key)
+        await aws.call(client.delete_object, Bucket=bucket, Key=key)
     except (ClientError, BotoCoreError) as exc:
         logger.warning("S3 delete_object failed for %s: %s", key, exc)
 
 
-def _get_object_bytes_sync(client: Any, key: str) -> bytes:
-    response = client.get_object(Bucket=settings.S3_BUCKET, Key=key)
+def _get_object_bytes_sync(client: Any, bucket: str, key: str) -> bytes:
+    response = client.get_object(Bucket=bucket, Key=key)
     return response["Body"].read()
 
 
-async def get_object_bytes(key: str) -> bytes:
-    if not settings.S3_BUCKET:
+async def get_object_bytes(key: str, *, bucket: str | None = None) -> bytes:
+    bucket = bucket or settings.S3_BUCKET
+    if not bucket:
         raise StorageError("S3_BUCKET is not configured")
     try:
         client = aws.s3_client()
-        return await aws.call(_get_object_bytes_sync, client, key)
+        return await aws.call(_get_object_bytes_sync, client, bucket, key)
     except (ClientError, BotoCoreError) as exc:
         logger.warning("S3 get_object failed for %s: %s", key, exc)
         raise StorageError("Could not read the object") from exc

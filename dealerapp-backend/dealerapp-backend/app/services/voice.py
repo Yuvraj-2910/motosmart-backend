@@ -93,23 +93,24 @@ async def transcribe_audio(
     """Upload a short clip to S3, run a batch Transcribe job, and return the text."""
     if not settings.TRANSCRIBE_ENABLED:
         raise TranscribeError("Voice transcription is not enabled")
-    if not settings.S3_BUCKET:
-        raise TranscribeError("S3_BUCKET is not configured")
+    bucket = settings.voice_bucket
+    if not bucket:
+        raise TranscribeError("S3_VOICE_BUCKET/S3_BUCKET is not configured")
 
     media_format = _media_format(content_type, filename)
     key = storage.build_key("voice-notes", filename or f"note.{media_format}")
-    await storage.put_object(key=key, data=data, content_type=content_type)
+    await storage.put_object(key=key, data=data, content_type=content_type, bucket=bucket)
 
     job_name = f"voice-{uuid.uuid4().hex}"
     output_key = f"voice-notes-transcripts/{job_name}.json"
-    media_uri = f"s3://{settings.S3_BUCKET}/{key}"
+    media_uri = f"s3://{bucket}/{key}"
 
     client = aws.transcribe_client()
     job_kwargs: dict[str, Any] = {
         "TranscriptionJobName": job_name,
         "Media": {"MediaFileUri": media_uri},
         "MediaFormat": media_format,
-        "OutputBucketName": settings.S3_BUCKET,
+        "OutputBucketName": bucket,
         "OutputKey": output_key,
     }
     fixed_language = language_code or settings.TRANSCRIBE_LANGUAGE_CODE
@@ -127,19 +128,19 @@ async def transcribe_audio(
         await aws.call(client.start_transcription_job, **job_kwargs)
     except (ClientError, BotoCoreError) as exc:
         logger.warning("Transcribe start_transcription_job failed: %s", exc)
-        await storage.delete_object(key)
+        await storage.delete_object(key, bucket=bucket)
         raise TranscribeError("Could not start transcription") from exc
 
     try:
-        result_language, transcript = await _poll_and_fetch(client, job_name, output_key)
+        result_language, transcript = await _poll_and_fetch(client, job_name, output_key, bucket)
         return TranscriptionResult(
             text=transcript, language_code=result_language, source="transcribe"
         )
     finally:
         # Best-effort cleanup: never leave the dealer's voice recording sitting
         # in S3 longer than the request that produced it.
-        await storage.delete_object(key)
-        await storage.delete_object(output_key)
+        await storage.delete_object(key, bucket=bucket)
+        await storage.delete_object(output_key, bucket=bucket)
         try:
             await aws.call(client.delete_transcription_job, TranscriptionJobName=job_name)
         except (ClientError, BotoCoreError) as exc:
@@ -147,7 +148,7 @@ async def transcribe_audio(
 
 
 async def _poll_and_fetch(
-    client: Any, job_name: str, output_key: str
+    client: Any, job_name: str, output_key: str, bucket: str
 ) -> tuple[str | None, str]:
     deadline = time.monotonic() + settings.TRANSCRIBE_MAX_POLL_SECONDS
     delay = 1.5
@@ -160,7 +161,7 @@ async def _poll_and_fetch(
         job_status = job["TranscriptionJob"]["TranscriptionJobStatus"]
         if job_status == "COMPLETED":
             language_code = job["TranscriptionJob"].get("LanguageCode")
-            raw = await storage.get_object_bytes(output_key)
+            raw = await storage.get_object_bytes(output_key, bucket=bucket)
             payload = json.loads(raw)
             transcripts = payload.get("results", {}).get("transcripts", [])
             text = transcripts[0]["transcript"] if transcripts else ""

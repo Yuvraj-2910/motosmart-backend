@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # S3
     S3_BUCKET: str = ""
     S3_PRESIGN_EXPIRY_SECONDS: int = 900
+    # Separate bucket for voice-note clips, so the Transcribe/S3 permissions
+    # that back the mic feature stay scoped away from S3_BUCKET (bike photos,
+    # brochures, attachments). Empty falls back to S3_BUCKET.
+    S3_VOICE_BUCKET: str = ""
 
     # SES / SNS
     SES_FROM_EMAIL: str = ""
@@ -103,6 +107,11 @@ class Settings(BaseSettings):
     def bedrock_region(self) -> str:
         """Region for bedrock-runtime only; everything else uses AWS_REGION."""
         return self.BEDROCK_REGION or self.AWS_REGION
+
+    @property
+    def voice_bucket(self) -> str:
+        """Bucket for voice-note clips; everything else uses S3_BUCKET."""
+        return self.S3_VOICE_BUCKET or self.S3_BUCKET
 
     @property
     def cognito_issuer(self) -> str:
