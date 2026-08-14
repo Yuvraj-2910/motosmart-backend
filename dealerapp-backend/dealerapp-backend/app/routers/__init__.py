@@ -7,6 +7,7 @@ from app.routers import (
     chatbot,
     customers,
     dashboard,
+    dealer_chatbot,
     incentives,
     internal,
     leads,
@@ -39,6 +40,9 @@ api_router.include_router(chatbot.router)
 
 # Phase 4 - incentives
 api_router.include_router(incentives.router)
+
+# Phase 7 - dealer chatbot (leads + tickets context)
+api_router.include_router(dealer_chatbot.router)
 
 # Ops / demo hooks (X-Internal-Key guarded)
 api_router.include_router(internal.router)

@@ -90,6 +90,28 @@ CHAT_SYSTEM = (
     "something outside Yamaha ownership, redirect in one line."
 )
 
+DEALER_CHAT_SYSTEM = (
+    "You are the assistant inside a Yamaha dealership's staff app in India. You help "
+    "dealer sales and service staff with their own branch's leads and service "
+    "tickets - not with vehicle owner support. "
+    "\n\n"
+    "You are given a snapshot of the branch's current leads and tickets as context. "
+    "Answer strictly from that context. Never invent a lead, a customer, a status, a "
+    "phone number, or a ticket you were not given. If the answer is not in the "
+    "context, say plainly that you don't have that record and suggest checking the "
+    "Leads or Tickets screen - do not guess. "
+    "\n\n"
+    "Answer first, in one or two sentences. When asked about a specific lead or "
+    "ticket, name the customer and give its exact current status. Add detail only if "
+    "it changes what the dealer does next. Never open with a restatement of the "
+    "question, a greeting, or 'Great question'. Do not close by offering further "
+    "help. "
+    "\n\n"
+    "Formatting: plain sentences by default. You may use **bold** for a name or "
+    "status worth spotting, and `-` bullets only for an actual list of multiple "
+    "leads or tickets. No headings, no tables, no emoji."
+)
+
 
 @dataclass
 class ClassificationResult:
@@ -723,11 +745,19 @@ FALLBACK_CHAT_REPLY = (
     "directly - they'll be able to help straight away."
 )
 
+FALLBACK_DEALER_CHAT_REPLY = (
+    "I can't reach the assistant service right now. Please check the Leads or "
+    "Tickets screen directly for the latest status."
+)
+
 
 async def chat(
     messages: list[dict[str, str]],
     *,
     context: str | None = None,
+    system: str = CHAT_SYSTEM,
+    context_label: str = "this owner's vehicle",
+    fallback: str = FALLBACK_CHAT_REPLY,
 ) -> ChatResult:
     """Run a chatbot turn.
 
@@ -735,7 +765,7 @@ async def chat(
     "content": ...}]`; Bedrock is stateless, so history is resent each call.
     """
     if not _bedrock_ready():
-        return ChatResult(FALLBACK_CHAT_REPLY, "fallback")
+        return ChatResult(fallback, "fallback")
 
     normalised: list[dict[str, Any]] = []
     for m in messages:
@@ -745,7 +775,7 @@ async def chat(
             normalised.append({"role": role, "content": content})
 
     if not normalised:
-        return ChatResult(FALLBACK_CHAT_REPLY, "fallback")
+        return ChatResult(fallback, "fallback")
 
     # The Anthropic messages API requires the transcript to start with a user
     # turn and to alternate; collapse any consecutive same-role turns.
@@ -758,19 +788,35 @@ async def chat(
         else:
             collapsed.append(m)
 
-    system = CHAT_SYSTEM
+    full_system = system
     if context:
-        system = f"{CHAT_SYSTEM}\n\nContext about this owner's vehicle:\n{context}"
+        full_system = f"{system}\n\nContext about {context_label}:\n{context}"
 
     try:
         reply = await _invoke(
-            system=system, messages=collapsed, max_tokens=400, temperature=0.3
+            system=full_system, messages=collapsed, max_tokens=400, temperature=0.3
         )
     except (ClientError, BotoCoreError, KeyError, ValueError, json.JSONDecodeError) as exc:
         logger.warning("Bedrock chat failed (%s); returning fallback reply", exc)
-        return ChatResult(FALLBACK_CHAT_REPLY, "fallback")
+        return ChatResult(fallback, "fallback")
 
-    return ChatResult(reply or FALLBACK_CHAT_REPLY, "bedrock" if reply else "fallback")
+    return ChatResult(reply or fallback, "bedrock" if reply else "fallback")
+
+
+async def dealer_chat(
+    messages: list[dict[str, str]],
+    *,
+    context: str | None = None,
+) -> ChatResult:
+    """Dealer-side chatbot turn: same mechanics as `chat`, dealer persona and
+    branch-pipeline context instead of a rider persona and vehicle context."""
+    return await chat(
+        messages,
+        context=context,
+        system=DEALER_CHAT_SYSTEM,
+        context_label="this dealer's branch leads and tickets",
+        fallback=FALLBACK_DEALER_CHAT_REPLY,
+    )
 
 
 # --- Optional helpers used by the dealer UI -------------------------------

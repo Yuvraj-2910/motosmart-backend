@@ -6,6 +6,7 @@ Importing this package registers every table on `Base.metadata`, which is what
 
 from app.models.base import Base
 from app.models.catalog import BikeModel, ExchangeValue
+from app.models.dealer_chat import DealerChatbotConversation, DealerChatbotMessage
 from app.models.engagement import Notification, TestRideBooking
 from app.models.incentive import EmployeeIncentive, IncentiveRule
 from app.models.lead import Lead, LeadFollowup
@@ -25,6 +26,8 @@ __all__ = [
     "ChatbotMessage",
     "Customer",
     "Dealer",
+    "DealerChatbotConversation",
+    "DealerChatbotMessage",
     "Employee",
     "EmployeeIncentive",
     "ExchangeValue",
